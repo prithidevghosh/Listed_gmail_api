@@ -1,5 +1,3 @@
-
-
 const axios = require('axios');
 require('dotenv').config();
 const { client_secret, client_id, redirect_uris, refresh_token, gmail_user } = process.env;
@@ -11,7 +9,7 @@ const clientSecret = client_secret;
 const refreshToken = refresh_token;
 
 // Store the processed thread IDs
-const processedThreads = [];
+let processedThreads = [];
 
 async function checkNewEmails() {
     try {
@@ -69,8 +67,7 @@ async function checkNewEmails() {
             // Check if the email thread has no prior replies and subject doesn't contain "Re: Out of Office Auto Reply"
             const hasReplies = thread.some((msg) =>
                 msg.payload.headers.some(
-                    (header) =>
-                        header.name === 'From' && header.value === ''
+                    (header) => header.name === 'From' && header.value === ''
                 )
             );
 
@@ -86,15 +83,12 @@ async function checkNewEmails() {
                 const replyMessage = {
                     to: sender,
                     subject: 'Re: Out of Office Auto Reply',
-                    message: 'Thank you for your email. I am currently on vacation and will reply to your message when I return.'
+                    message:
+                        'Thank you for your email. I am currently on vacation and will reply to your message when I return.'
                 };
-                await sendReply(replyMessage, accessToken);
+                const sentmail = await sendReply(replyMessage, accessToken);
 
-                // Add label and move email
-                const labelName = 'Vacation Reply';
-                await addLabelToEmail(message.id, labelName, accessToken);
-
-                console.log('Reply sent and label added to the email.');
+                console.log('Reply sent.');
 
                 // Mark the thread as processed
                 processedThreads.push(threadId);
@@ -130,6 +124,11 @@ async function sendReply(replyMessage, accessToken) {
     );
 
     const threadId = sentMessage.threadId;
+
+    // Add label to the sent reply email
+    const labelName = 'Vacation Reply';
+    await addLabelToEmail(sentMessage.id, labelName, accessToken);
+
     await markThreadAsRead(threadId, accessToken);
 }
 
@@ -205,12 +204,13 @@ async function addLabelToEmail(messageId, labelName, accessToken) {
         console.error('Error adding label to email:', error.message);
     }
 }
+
 const MIN_INTERVAL = 45000; // 45 seconds
 const MAX_INTERVAL = 120000; // 120 seconds
+
 function getRandomInterval() {
     return Math.floor(Math.random() * (MAX_INTERVAL - MIN_INTERVAL + 1)) + MIN_INTERVAL;
 }
-
 
 async function runAutoReply() {
     while (true) {
@@ -221,9 +221,7 @@ async function runAutoReply() {
 }
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 runAutoReply().catch(console.error);
-// Call the function to check for new emails
-
