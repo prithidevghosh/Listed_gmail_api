@@ -1,8 +1,8 @@
 const axios = require('axios');
 require('dotenv').config();
+
 const { client_secret, client_id, redirect_uris, refresh_token, gmail_user } = process.env;
 
-console.log(client_id);
 // Set up OAuth 2.0 credentials
 const clientId = client_id;
 const clientSecret = client_secret;
@@ -20,7 +20,6 @@ async function checkNewEmails() {
             refresh_token: refreshToken,
             grant_type: 'refresh_token'
         });
-        console.log(data);
         const accessToken = data.access_token;
 
         // Make API request to get new unread emails
@@ -33,6 +32,7 @@ async function checkNewEmails() {
             }
         );
 
+
         const messages = messagesData.messages || [];
         if (messages.length === 0) {
             console.log('No new unread emails.');
@@ -42,6 +42,7 @@ async function checkNewEmails() {
         console.log('New unread emails:');
 
         for (const message of messages) {
+            console.log(message.id);
             const { data: threadData } = await axios.get(
                 `https://gmail.googleapis.com/gmail/v1/users/me/threads/${message.threadId}`,
                 {
@@ -51,105 +52,130 @@ async function checkNewEmails() {
                 }
             );
 
-            const thread = threadData.messages || [];
-            const sender = thread[0].payload.headers.find(
-                (header) => header.name === 'From'
-            ).value;
-
-            const threadId = thread[0].threadId;
-
-            // Skip the thread if it has already been processed
-            if (processedThreads.includes(threadId)) {
-                console.log('Skipping already processed thread:', threadId);
-                continue;
-            }
-
-            // Check if the email thread has no prior replies and subject doesn't contain "Re: Out of Office Auto Reply"
-            const hasReplies = thread.some((msg) =>
-                msg.payload.headers.some(
-                    (header) => header.name === 'From' && header.value === ''
-                )
+            const senders = threadData.messages.map((message) =>
+                message.payload.headers.find((header) => header.name === 'From').value
             );
 
-            const subject = thread[0].payload.headers.find(
-                (header) => header.name === 'Subject'
-            ).value;
+            for (let sender of senders) {
+                if (sender === gmail_user) {
+                    console.log("Same as owner, skipping...");
+                    continue;
+                } else {
+                    console.log('- Message ID:', message.id);
+                    console.log('  Sender:', sender);
 
-            if (!hasReplies && !subject.includes('Re: Out of Office Auto Reply')) {
-                console.log('- Message ID:', message.id);
-                console.log('  Sender:', sender);
+                    const originalSubject = threadData.messages[0].payload.headers.find(header => header.name === 'Subject').value;
 
-                // Send reply
-                const replyMessage = {
-                    to: sender,
-                    subject: 'Re: Out of Office Auto Reply',
-                    message:
-                        'Thank you for your email. I am currently on vacation and will reply to your message when I return.'
-                };
-                const sentmail = await sendReply(replyMessage, accessToken);
 
-                console.log('Reply sent.');
+                    // Get the Message-ID of the original email
+                    const originalMessageIdHeader = threadData.messages[0].payload.headers.find(
+                        (header) => header.name === 'Message-ID'
+                    );
 
-                // Mark the thread as processed
-                processedThreads.push(threadId);
+                    // Check if the original email has a Message-ID header
+                    if (!originalMessageIdHeader) {
+                        console.log('Original email does not have a Message-ID header');
+                        continue;
+                    }
+
+                    const originalMessageId = originalMessageIdHeader.value;
+
+                    // Send reply
+                    const replyMessage = {
+                        to: sender,
+                        subject: originalSubject,
+                        threadIdSending: threadData.id,
+                        messageId: message.id,
+                        originalMessageId: originalMessageId,
+                        message:
+                            'Thank you for your email. I am currently on vacation and will reply to your message when I return.',
+                    };
+
+                    await sendReply(replyMessage, accessToken);
+
+                    console.log('Reply sent.');
+
+                    // Mark the thread as processed
+                    processedThreads.push(threadData.id);
+                }
             }
         }
     } catch (error) {
         console.error('Error checking new emails:', error.message);
+        console.error(error.response.data);
     }
 }
 
 async function sendReply(replyMessage, accessToken) {
-    const { to, subject, message } = replyMessage;
+    const { to, subject, threadIdSending, messageId, originalMessageId, message } =
+        replyMessage;
+    const replySubject = `Re: ${subject}`;
+    const replyBody = message;
+    const replyEmail = {
+        raw: Buffer.from(
+            `To: ${to}\r\n` +
+            `Subject: ${replySubject}\r\n` +
+            `In-Reply-To: ${originalMessageId}\r\n` +
+            `References: ${originalMessageId}\r\n` +
+            `Message-ID: ${messageId}\r\n` +
+            '\r\n' +
+            `${replyBody}`
+        ).toString('base64'),
+    };
 
-    const rawMessage = [
-        'Content-Type: text/plain; charset=utf-8',
-        `To: ${to}`,
-        `Subject: ${subject}`,
-        '',
-        message
-    ].join('\n');
-
-    const { data: sentMessage } = await axios.post(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/send`,
-        {
-            raw: Buffer.from(rawMessage).toString('base64')
-        },
-        {
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            }
-        }
-    );
-
-    const threadId = sentMessage.threadId;
-
-    // Add label to the sent reply email
-    const labelName = 'Vacation Reply';
-    await addLabelToEmail(sentMessage.id, labelName, accessToken);
-
-    await markThreadAsRead(threadId, accessToken);
-}
-
-async function markThreadAsRead(threadId, accessToken) {
     try {
-        await axios.post(
-            `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/modify`,
-            {
-                removeLabelIds: ['UNREAD']
-            },
+        const { data } = await axios.post(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/send`,
+            { raw: replyEmail.raw, threadId: threadIdSending },
             {
                 headers: {
                     Authorization: `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json'
-                }
+                    'Content-Type': 'application/json',
+                },
             }
         );
+
+        console.log('Reply sent successfully!');
+        console.log('Sent message:', data);
+
+        const labelName = 'Vacation Reply';
+        await addLabelToEmail(data.id, labelName, accessToken);
+
+        // await markThreadAsRead(threadIdSending, accessToken);
+
     } catch (error) {
-        console.error('Error marking thread as read:', error.message);
+        console.error('Error sending reply:', error.message);
+        console.error('Error response:', error.response.data);
     }
 }
+
+
+// const threadId = sentMessage.threadId;
+
+// Add label to the sent reply email
+// const labelName = 'Vacation Reply';
+// await addLabelToEmail(sentMessage.id, labelName, accessToken);
+
+// await markThreadAsRead(threadId, accessToken);
+
+// async function markThreadAsRead(threadId, accessToken) {
+//     try {
+//         await axios.post(
+//             `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/modify`,
+//             {
+//                 removeLabelIds: ['UNREAD']
+//             },
+//             {
+//                 headers: {
+//                     Authorization: `Bearer ${accessToken}`,
+//                     'Content-Type': 'application/json'
+//                 }
+//             }
+//         );
+//     } catch (error) {
+//         console.error('Error marking thread as read:', error.message);
+//     }
+// }
 
 async function addLabelToEmail(messageId, labelName, accessToken) {
     try {
